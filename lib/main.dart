@@ -1,14 +1,29 @@
 // FILE: lib/main.dart
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart'; // IMPORT NOU
 import 'firebase_options.dart'; // IMPORT NOU (Fișierul generat de tine adineauri)
 import 'screens/splash_screen.dart';
 import 'services/notification_service.dart';
+import 'package:google_mobile_ads/google_mobile_ads.dart';
 
 // Modificăm main() ca să fie asincron (să poată aștepta conexiunea la internet)
 Future<void> main() async {
   // 1. Pregătire obligatorie
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Edge-to-edge for Android 15+ (SDK 35). Flutter draws behind system bars.
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  SystemChrome.setSystemUIOverlayStyle(
+    const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      systemNavigationBarColor: Colors.transparent,
+      systemNavigationBarDividerColor: Colors.transparent,
+      statusBarIconBrightness: Brightness.light,
+      statusBarBrightness: Brightness.dark,
+      systemNavigationBarIconBrightness: Brightness.light,
+    ),
+  );
 
   try {
     // 2. Încercăm să pornim Firebase, dar îi dăm MAXIM 8 secunde.
@@ -19,6 +34,9 @@ Future<void> main() async {
     
     // 3. Pornim notificările cu o limită de 4 secunde.
     await NotificationService().init().timeout(const Duration(seconds: 4));
+    // Schedule daily recurring reminders at app start.
+    await NotificationService().scheduleDailyQuestReminders().timeout(const Duration(seconds: 4));
+    await MobileAds.instance.initialize().timeout(const Duration(seconds: 4));
     
     print("Habit Quest: Servicii pornite cu succes!");
   } catch (e) {
