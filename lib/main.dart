@@ -5,6 +5,7 @@ import 'package:firebase_core/firebase_core.dart'; // IMPORT NOU
 import 'firebase_options.dart'; // IMPORT NOU (Fișierul generat de tine adineauri)
 import 'screens/splash_screen.dart';
 import 'services/notification_service.dart';
+import 'services/app_open_ad_manager.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 
 // Modificăm main() ca să fie asincron (să poată aștepta conexiunea la internet)
@@ -37,20 +38,45 @@ Future<void> main() async {
     // Schedule daily recurring reminders at app start.
     await NotificationService().scheduleDailyQuestReminders().timeout(const Duration(seconds: 4));
     await MobileAds.instance.initialize().timeout(const Duration(seconds: 4));
-    
-    print("Habit Quest: Servicii pornite cu succes!");
-  } catch (e) {
+  } catch (_) {
     // Dacă apare orice eroare (SHA-1 greșit, net prost), o prindem aici
     // și lăsăm aplicația să pornească oricum, în loc să înghețe.
-    print("Habit Quest: Eroare la pornire servicii, dar continuăm: $e");
   }
 
   // 4. Această linie TREBUIE să fie executată orice ar fi
   runApp(const HabitQuestApp());
 }
 
-class HabitQuestApp extends StatelessWidget {
+class HabitQuestApp extends StatefulWidget {
   const HabitQuestApp({super.key});
+
+  @override
+  State<HabitQuestApp> createState() => _HabitQuestAppState();
+}
+
+class _HabitQuestAppState extends State<HabitQuestApp>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
+    // Preload as soon as UI starts.
+    AppOpenAdManager().loadAd();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      AppOpenAdManager().showAdIfAvailable();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {

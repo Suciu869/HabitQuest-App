@@ -5,8 +5,16 @@ import '../models/quest.dart';
 class CalendarScreen extends StatefulWidget {
   final List<Quest> quests;
   final DateTime currentDate;
+  final Map<DateTime, List<String>> dailyHistory;
+  final List<String> Function(DateTime date) eventLoader;
 
-  const CalendarScreen({super.key, required this.quests, required this.currentDate});
+  const CalendarScreen({
+    super.key,
+    required this.quests,
+    required this.currentDate,
+    required this.dailyHistory,
+    required this.eventLoader,
+  });
 
   @override
   State<CalendarScreen> createState() => _CalendarScreenState();
@@ -14,6 +22,8 @@ class CalendarScreen extends StatefulWidget {
 
 class _CalendarScreenState extends State<CalendarScreen> {
   late DateTime selectedDate;
+
+  DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
 
   @override
   void initState() {
@@ -26,6 +36,51 @@ class _CalendarScreenState extends State<CalendarScreen> {
     return "${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}";
   }
 
+  void _showDaySummary(DateTime day) {
+    final entries = widget.eventLoader(day);
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) {
+        return Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Quest Summary - ${_formatDate(day)}',
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+              ),
+              const SizedBox(height: 12),
+              if (entries.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 16),
+                  child: Text('No completed quests on this day.', style: TextStyle(color: Colors.white54)),
+                )
+              else
+                ...entries.map(
+                  (title) => Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.check_circle, color: Colors.green, size: 18),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(title)),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final List<String> monthNames = [
@@ -34,8 +89,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     ];
     final colorScheme = Theme.of(context).colorScheme;
 
-    // Găsim questurile completate în ziua selectată
-    List<Quest> selectedDayQuests = widget.quests.where((q) => q.isCompletedOn(selectedDate)).toList();
+    final selectedDayEvents = widget.eventLoader(selectedDate);
 
     return SafeArea(
       child: Column(
@@ -99,11 +153,15 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
                         bool isSelected = _formatDate(cellDate) == _formatDate(selectedDate);
                         bool isToday = _formatDate(cellDate) == _formatDate(widget.currentDate);
-                        int completedCount = widget.quests.where((q) => q.isCompletedOn(cellDate)).length;
+                        final events = widget.eventLoader(cellDate);
+                        final completedCount = events.length;
 
                         // Design modern pentru celula de calendar
                         return GestureDetector(
-                          onTap: () => setState(() => selectedDate = cellDate),
+                          onTap: () {
+                            setState(() => selectedDate = _dateOnly(cellDate));
+                            _showDaySummary(cellDate);
+                          },
                           child: AnimatedContainer(
                             duration: const Duration(milliseconds: 300),
                             decoration: BoxDecoration(
@@ -128,12 +186,19 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                 if (completedCount > 0)
                                   Positioned(
                                     bottom: 6,
-                                    child: Container(
-                                      width: 6,
-                                      height: 6,
-                                      decoration: BoxDecoration(
-                                        color: isSelected ? colorScheme.onPrimary : Colors.green,
-                                        shape: BoxShape.circle,
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: List.generate(
+                                        completedCount > 3 ? 3 : completedCount,
+                                        (i) => Container(
+                                          margin: const EdgeInsets.symmetric(horizontal: 1),
+                                          width: 5,
+                                          height: 5,
+                                          decoration: BoxDecoration(
+                                            color: isSelected ? colorScheme.onPrimary : Colors.green,
+                                            shape: BoxShape.circle,
+                                          ),
+                                        ),
                                       ),
                                     ),
                                   ),
@@ -166,18 +231,17 @@ class _CalendarScreenState extends State<CalendarScreen> {
                 ),
                 const SizedBox(height: 10),
                 Expanded(
-                  child: selectedDayQuests.isEmpty
+                  child: selectedDayEvents.isEmpty
                       ? Center(child: Text('No activity yet.', style: TextStyle(color: colorScheme.outline)))
                       : ListView.separated(
-                          itemCount: selectedDayQuests.length,
+                          itemCount: selectedDayEvents.length,
                           separatorBuilder: (_, _) => Divider(color: colorScheme.outlineVariant),
                           itemBuilder: (context, i) {
-                            final q = selectedDayQuests[i];
                             return Row(
                               children: [
                                 Icon(Icons.check_circle, color: Colors.green),
                                 const SizedBox(width: 12),
-                                Text(q.title, style: const TextStyle(fontWeight: FontWeight.w600)),
+                                Text(selectedDayEvents[i], style: const TextStyle(fontWeight: FontWeight.w600)),
                               ],
                             );
                           },

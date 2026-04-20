@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/quest.dart';
 import 'calendar_screen.dart';
 import 'add_quest_screen.dart';
+import 'hero_dashboard_screen.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'profile_screen.dart';
@@ -11,6 +12,7 @@ import '../services/notification_service.dart';
 import '../services/rewarded_ad_service.dart';
 import '../services/quest_storage.dart';
 import '../services/time_service.dart';
+import '../services/user_profile_controller.dart';
 import '../widgets/streak_badge.dart';
 
 class MainScaffold extends StatefulWidget {
@@ -20,18 +22,21 @@ class MainScaffold extends StatefulWidget {
   State<MainScaffold> createState() => _MainScaffoldState();
 }
 
-class _MainScaffoldState extends State<MainScaffold> {
+class _MainScaffoldState extends State<MainScaffold> with WidgetsBindingObserver {
   int _currentIndex = 0;
   
   // Variabilele jocului
   int level = 1;
   int xp = 0;
+  int gold = 0;
   int targetXp = 100;
   DateTime currentDate = DateTime.now();
   String currentAvatar = '🧑‍🌾'; 
   List<Quest> quests = [];
   final QuestStorage _questStorage = QuestStorage();
   final TimeService _time = TimeService();
+  final UserProfileController _userProfileController = UserProfileController();
+  Map<DateTime, List<String>> dailyHistory = {};
 
   // --- UNELTELE FIREBASE & CONFETTI ---
   late ConfettiController _confettiController;
@@ -40,32 +45,56 @@ class _MainScaffoldState extends State<MainScaffold> {
 
   DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
 
-  Future<void> _applyStreakAging({
+  void _syncStatsFromProfile() {
+    level = _userProfileController.profile.level;
+    xp = _userProfileController.profile.currentXP;
+    gold = _userProfileController.profile.gold;
+    targetXp = _userProfileController.getRequiredXpForNextLevel(level);
+  }
+
+  List<String> _eventLoader(DateTime date) {
+    return List<String>.from(dailyHistory[_dateOnly(date)] ?? const []);
+  }
+
+  Map<DateTime, List<String>> _buildHistoryFromQuests(List<Quest> source) {
+    final history = <DateTime, List<String>>{};
+    for (final quest in source) {
+      for (final date in quest.completedDates) {
+        final key = _dateOnly(date);
+        final list = history[key] ?? <String>[];
+        if (!list.contains(quest.title)) list.add(quest.title);
+        history[key] = list;
+      }
+    }
+    return history;
+  }
+
+  Future<void> verifyDailyReset({
     required DateTime now,
     required bool showPopup,
   }) async {
     final today = _dateOnly(now);
-    bool anyBrokeNow = false;
+    final List<Quest> brokenNow = [];
     bool shouldNotifyUser = false;
 
     setState(() {
       for (final q in quests) {
-        final prev = q.streak;
-        q.ensureStreakUpToDate(now);
-        final brokeNow = prev > 0 && q.streak == 0;
+        final brokeNow = q.checkDailyReset(today);
         if (brokeNow) {
-          anyBrokeNow = true;
+          brokenNow.add(q);
         }
         if (brokeNow && showPopup && (q.lastBreakNoticeDate == null || q.lastBreakNoticeDate != today)) {
-          // Mark as notified for today so we don't spam.
           q.lastBreakNoticeDate = today;
           shouldNotifyUser = true;
         }
       }
     });
 
-    if (anyBrokeNow) {
+    if (brokenNow.isNotEmpty) {
       await _persistAll();
+      for (final brokenQuest in brokenNow) {
+        await NotificationService().showStreakFrozenNotification(questTitle: brokenQuest.title);
+      }
       _syncNotificationsForToday();
     }
 
@@ -73,7 +102,7 @@ class _MainScaffoldState extends State<MainScaffold> {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text(
-          'Streak broken! Tap the 💔 badge to watch an ad and restore your streak.',
+          'Your streak is frozen! Tap TAP TO RESCUE to watch an ad and restore progress.',
         ),
         behavior: SnackBarBehavior.floating,
         duration: Duration(seconds: 3),
@@ -84,6 +113,7 @@ class _MainScaffoldState extends State<MainScaffold> {
 @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _confettiController = ConfettiController(duration: const Duration(seconds: 3));
     _loadUserData(); 
     
@@ -93,8 +123,21 @@ class _MainScaffoldState extends State<MainScaffold> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _confettiController.dispose(); 
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _runDailyResetCheckOnResume();
+    }
+  }
+
+  Future<void> _runDailyResetCheckOnResume() async {
+    if (!mounted || quests.isEmpty) return;
+    await verifyDailyReset(now: _time.now(), showPopup: true);
   }
 
   // --- ÎNCĂRCARE DATE ---
@@ -103,15 +146,21 @@ class _MainScaffoldState extends State<MainScaffold> {
       await _time.init();
       // Ensure release users are always on real time.
       await _time.reset();
+      await _userProfileController.load();
+      _syncStatsFromProfile();
 
       // 1) Load local cache immediately (so restart doesn't "lose" state even offline).
       final cachedQuests = await _questStorage.loadQuests();
       final cachedLastActive = await _questStorage.loadLastActiveDate();
+      final cachedHistory = await _questStorage.loadDailyHistory();
       if (cachedQuests.isNotEmpty) {
+        final historySeed = cachedHistory.isEmpty ? _buildHistoryFromQuests(cachedQuests) : cachedHistory;
         setState(() {
           quests = cachedQuests;
+          dailyHistory = historySeed;
           currentDate = DateTime(_time.now().year, _time.now().month, _time.now().day);
         });
+        await verifyDailyReset(now: _time.now(), showPopup: false);
       }
 
       DocumentSnapshot doc = await _firestore.collection('users').doc(userId).get();
@@ -125,9 +174,13 @@ class _MainScaffoldState extends State<MainScaffold> {
         final lastActiveDateOnly = lastActive == null ? null : DateTime(lastActive.year, lastActive.month, lastActive.day);
 
         setState(() {
-          level = data['level'] ?? 1;
-          xp = data['xp'] ?? 0;
-          targetXp = data['targetXp'] ?? 100;
+          final remoteLevel = (data['level'] as num?)?.toInt();
+          final remoteXp = (data['xp'] as num?)?.toInt();
+          final remoteGold = (data['gold'] as num?)?.toInt();
+          if (remoteLevel != null) _userProfileController.profile.level = remoteLevel;
+          if (remoteXp != null) _userProfileController.profile.currentXP = remoteXp;
+          if (remoteGold != null) _userProfileController.profile.gold = remoteGold;
+          _syncStatsFromProfile();
           currentAvatar = data['avatar'] ?? '🧑‍🌾'; 
           currentDate = todayDateOnly;
           
@@ -139,7 +192,7 @@ class _MainScaffoldState extends State<MainScaffold> {
 
           // Keep streak correct vs 36h rule on startup.
           for (final q in quests) {
-            q.ensureStreakUpToDate(today);
+            q.checkDailyReset(today);
           }
         });
 
@@ -147,8 +200,10 @@ class _MainScaffoldState extends State<MainScaffold> {
         // Persist "lastActiveDate" so day comparisons are robust.
         await _persistLastActiveDate(todayDateOnly);
         await _questStorage.saveQuests(quests);
+        await _questStorage.saveDailyHistory(dailyHistory);
+        await _userProfileController.save();
         // If a streak just broke while the app was closed, notify once on startup.
-        await _applyStreakAging(now: today, showPopup: true);
+        await verifyDailyReset(now: today, showPopup: true);
 
         // If it's a new day, we intentionally do NOT remove any history.
         // "Today" is naturally unchecked unless a completion exists for today.
@@ -162,24 +217,34 @@ class _MainScaffoldState extends State<MainScaffold> {
         _syncNotificationsForToday();
       }
     } catch (e) {
-      print("Error downloading data: $e");
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Unable to sync cloud data right now. Using local data.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     }
   }
 
   void _syncNotificationsForToday() {
     final total = quests.length;
-    final completed = quests.where((q) => q.isCompletedOn(currentDate)).length;
+    final completed = quests.where((q) => q.isCheckedToday(currentDate)).length;
+    final hasPending = quests.any(
+      (q) => q.streakState(currentDate) != QuestStreakState.broken && !q.isCheckedToday(currentDate),
+    );
     NotificationService().syncDailyNotifications(
       totalQuests: total,
       completedToday: completed,
     );
+    NotificationService().syncFomoAtNinePm(hasPendingQuests: hasPending);
   }
 
   Future<void> _saveUserData() async {
     await _firestore.collection('users').doc(userId).set({
       'level': level,
       'xp': xp,
-      'targetXp': targetXp,
+      'gold': gold,
       'avatar': currentAvatar,
     }, SetOptions(merge: true));
   }
@@ -202,7 +267,9 @@ class _MainScaffoldState extends State<MainScaffold> {
 
   Future<void> _persistAll() async {
     // Local-first ensures persistence even if Firestore write is delayed.
+    await _userProfileController.save();
     await _questStorage.saveQuests(quests);
+    await _questStorage.saveDailyHistory(dailyHistory);
     await _saveUserData();
     await _saveQuestsToFirestore();
     await _persistLastActiveDate(_time.now());
@@ -212,6 +279,14 @@ class _MainScaffoldState extends State<MainScaffold> {
     final deletedQuest = quests[index]; 
     setState(() {
       quests.removeAt(index);
+      for (final entry in dailyHistory.entries.toList()) {
+        entry.value.remove(deletedQuest.title);
+        if (entry.value.isEmpty) {
+          dailyHistory.remove(entry.key);
+        } else {
+          dailyHistory[entry.key] = entry.value;
+        }
+      }
     });
     await _persistAll();
     _syncNotificationsForToday();
@@ -226,79 +301,86 @@ class _MainScaffoldState extends State<MainScaffold> {
     );
   }
 
-  // --- LOGICA DE XP / BIFĂ ---
+  // --- LOGICA DE XP/GOLD / BIFĂ ---
   Future<void> completeQuest(int index) async {
     final now = _time.now();
     final today = DateTime(now.year, now.month, now.day);
     currentDate = today;
-    bool wasAlreadyDone = quests[index].isCompletedOn(today);
+    final quest = quests[index];
+    final wasAlreadyDone = quest.isCheckedToday(today);
+    var becameDoneToday = false;
+    var becameUndoneToday = false;
+    var appliedFailurePenalty = false;
 
     setState(() {
-      // Uses 36h grace logic via lastCompletedAt/streak persistence.
-      quests[index].toggleCompletedAt(now);
-
-      if (!wasAlreadyDone && quests[index].isCompletedOn(today)) {
-        xp += 25;
-      } 
-      else if (wasAlreadyDone && !quests[index].isCompletedOn(today)) {
-        xp -= 25;
-        if (xp < 0) xp = 0; 
+      if (quest.type == QuestType.negative) {
+        appliedFailurePenalty = quest.failNegativeToday(now);
+      } else if (quest.type == QuestType.progressive && !quest.isCheckedToday(today)) {
+        becameDoneToday = quest.incrementProgress(now);
+      } else {
+        quest.toggleCompletedAt(now);
       }
 
-      // Logică Level Up 
-      // Logică Level Up 
-      if (xp >= targetXp) {
-        level++;
-        xp = xp - targetXp;
-        targetXp = (targetXp * 1.5).toInt();
-        
-        // DECLANȘEAZĂ ANIMAȚIA!
+      becameDoneToday = becameDoneToday || (!wasAlreadyDone && quest.isCheckedToday(today));
+      becameUndoneToday = wasAlreadyDone && !quest.isCheckedToday(today);
+
+      final key = _dateOnly(today);
+      final events = List<String>.from(dailyHistory[key] ?? const []);
+      if (becameDoneToday) {
+        if (!events.contains(quest.title)) events.add(quest.title);
+      } else if (becameUndoneToday) {
+        events.remove(quest.title);
+      }
+      if (events.isEmpty) {
+        dailyHistory.remove(key);
+      } else {
+        dailyHistory[key] = events;
+      }
+
+      if (becameDoneToday && quest.streakCount > quest.maxStreak) {
+        quest.maxStreak = quest.streakCount;
+      }
+    });
+
+    if (becameDoneToday) {
+      final previousLevel = _userProfileController.profile.level;
+      await _userProfileController.addReward(25, 5);
+      _syncStatsFromProfile();
+      if (level > previousLevel) {
         _confettiController.play(); 
 
-        // --- NOU: VERIFICĂM DACĂ AM DEBLOCAT UN AVATAR ---
         String unlockedAvatarMsg = "";
-        // Căutăm în lista de avatare din ProfileScreen dacă vreunul corespunde cu noul nivel
         for (var avatar in ProfileScreen.avatars) {
           if (avatar['level'] == level) {
             unlockedAvatarMsg = "\n🔓 New Avatar Unlocked: ${avatar['emoji']} ${avatar['name']}!";
-            break; // Am găsit avatarul, ne oprim din căutat
+            break;
           }
         }
-        
-        // Afișăm mesajul de victorie (cu sau fără avatar nou)
+
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Level Up! You are now Level $level$unlockedAvatarMsg', // Adăugăm mesajul surpriză aici
+              'Level Up! You are now Level $level$unlockedAvatarMsg',
               style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
             ),
             backgroundColor: Colors.green,
             behavior: SnackBarBehavior.floating,
-            duration: const Duration(seconds: 4), // Am pus 4 secunde ca să aibă timp să citească
+            duration: const Duration(seconds: 4),
           ),
         );
       }
-    });
+    } else if (becameUndoneToday) {
+      await _userProfileController.removeReward(25, 5);
+      _syncStatsFromProfile();
+    } else if (appliedFailurePenalty) {
+      await _userProfileController.removeReward(15, 10);
+      _syncStatsFromProfile();
+    }
     
+    setState(() {});
     await _persistAll();
     _syncNotificationsForToday();
   }
-
-  // --- SIMULARE ZI URMĂTOARE ---
-  // void simulateNextDay() {
-  //   setState(() {
-  //     currentDate = currentDate.add(const Duration(days: 1));
-  //   });
-  //   _saveUserData();
-    
-  //   ScaffoldMessenger.of(context).showSnackBar(
-  //     SnackBar(
-  //       content: Text('Time travel successful! Current date: ${currentDate.day}/${currentDate.month}'),
-  //       backgroundColor: Colors.blueGrey,
-  //       duration: const Duration(seconds: 1),
-  //     ),
-  //   );
-  // }
 
   // --- ADĂUGARE QUEST ---
   Future<void> _openAddQuestSheet() async {
@@ -367,8 +449,8 @@ class _MainScaffoldState extends State<MainScaffold> {
                       ],
                     ),
                     const SizedBox(height: 10),
-                    const Text(
-                      'You missed yesterday. Watch a rewarded ad to restore your streak and reignite your fire.',
+                    Text(
+                      'Your flame for "${quest.title}" is frozen. Recover ${quest.recoveryStreakValue} day streak with this rescue.',
                       style: TextStyle(color: Colors.white70, height: 1.35),
                     ),
                     const SizedBox(height: 16),
@@ -385,11 +467,11 @@ class _MainScaffoldState extends State<MainScaffold> {
                                     Navigator.of(context).pop(ok);
                                   },
                             style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF2A1A12),
-                              foregroundColor: Colors.white,
+                              backgroundColor: const Color(0xFF3A2712),
+                              foregroundColor: const Color(0xFFFFF3D1),
                               padding: const EdgeInsets.symmetric(vertical: 14),
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                              side: const BorderSide(color: Color(0x55FF6A00)),
+                              side: const BorderSide(color: Color(0xFFFFC107), width: 1.4),
                             ),
                             icon: loading
                                 ? const SizedBox(
@@ -398,7 +480,7 @@ class _MainScaffoldState extends State<MainScaffold> {
                                     child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFFF6A00)),
                                   )
                                 : const Icon(Icons.play_circle_fill, color: Color(0xFFFF6A00)),
-                            label: Text(loading ? 'Opening ad…' : 'Watch Ad to Restore Streak'),
+                            label: Text(loading ? 'Opening portal…' : 'WATCH AD'),
                           ),
                         ),
                       ],
@@ -471,7 +553,10 @@ class _MainScaffoldState extends State<MainScaffold> {
                 const SizedBox(height: 8),
                 Align(
                   alignment: Alignment.centerRight,
-                  child: Text('$xp / $targetXp XP', style: const TextStyle(color: Colors.white54, fontSize: 14)),
+                  child: Text(
+                    '$xp / $targetXp XP • $gold Gold • ${_userProfileController.getPlayerTitle(level)}',
+                    style: const TextStyle(color: Colors.white54, fontSize: 14),
+                  ),
                 ),
               ],
             ),
@@ -491,17 +576,16 @@ class _MainScaffoldState extends State<MainScaffold> {
                       final quest = quests[index];
                       final now = _time.now();
                       final today = DateTime(now.year, now.month, now.day);
-                      final isDone = quest.isCompletedOn(today);
-                      final streak = quest.currentStreak(today);
-                      final isBroken = quest.isStreakBroken(now);
-                      final isGrace = !isDone && !isBroken && quest.isInWarningWindow(now);
-                      final badgeState = isBroken
+                      final isDone = quest.isCheckedToday(today);
+                      final streak = quest.streakBadgeValue(today);
+                      final streakState = quest.streakState(today);
+                      final badgeState = streakState == QuestStreakState.broken
                           ? StreakBadgeState.broken
-                          : isDone
-                              ? StreakBadgeState.validated
-                              : isGrace
-                                  ? StreakBadgeState.grace
-                                  : StreakBadgeState.waiting;
+                          : streakState == QuestStreakState.active
+                              ? StreakBadgeState.active
+                              : StreakBadgeState.safe;
+                      final isNegative = quest.type == QuestType.negative;
+                      final isProgressive = quest.type == QuestType.progressive;
 
                       return Dismissible(
                         key: Key('${quest.title}_$index'), 
@@ -514,6 +598,7 @@ class _MainScaffoldState extends State<MainScaffold> {
                         ),
                         onDismissed: (direction) => deleteQuest(index),
                         child: Card(
+                          color: isNegative ? const Color(0xFF2A1717) : null,
                           margin: EdgeInsets.zero,
                           child: ListTile(
                             contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
@@ -547,9 +632,72 @@ class _MainScaffoldState extends State<MainScaffold> {
                                 ),
                               ],
                             ),
-                            trailing: IconButton(
-                              icon: Icon(isDone ? Icons.check_circle : Icons.circle_outlined, color: isDone ? Colors.amber : Colors.white38, size: 28),
-                              onPressed: () => completeQuest(index),
+                            trailing: isNegative
+                                ? FilledButton(
+                                    style: FilledButton.styleFrom(
+                                      backgroundColor: Colors.red.shade800,
+                                      foregroundColor: Colors.white,
+                                    ),
+                                    onPressed: () => completeQuest(index),
+                                    child: const Text('I Failed'),
+                                  )
+                                : isProgressive
+                                    ? Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          SizedBox(
+                                            width: 56,
+                                            child: Text(
+                                              '${quest.currentProgress}/${quest.targetValue}',
+                                              style: const TextStyle(color: Colors.white70, fontSize: 11),
+                                              textAlign: TextAlign.center,
+                                            ),
+                                          ),
+                                          IconButton(
+                                            icon: const Icon(Icons.add_circle, color: Colors.amber, size: 30),
+                                            onPressed: () => completeQuest(index),
+                                          ),
+                                        ],
+                                      )
+                                    : IconButton(
+                                        icon: Icon(isDone ? Icons.check_circle : Icons.circle_outlined, color: isDone ? Colors.amber : Colors.white38, size: 28),
+                                        onPressed: () => completeQuest(index),
+                                      ),
+                            subtitle: Padding(
+                              padding: const EdgeInsets.only(top: 6),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  if (isProgressive)
+                                    Padding(
+                                      padding: const EdgeInsets.only(bottom: 6),
+                                      child: ClipRRect(
+                                        borderRadius: BorderRadius.circular(6),
+                                        child: LinearProgressIndicator(
+                                          value: quest.targetValue == 0 ? 0 : quest.currentProgress / quest.targetValue,
+                                          minHeight: 6,
+                                          backgroundColor: Colors.black45,
+                                          color: Colors.lightBlueAccent,
+                                        ),
+                                      ),
+                                    ),
+                                  Row(
+                                    children: [
+                                      Text(
+                                        'Streak: ${quest.streakCount}',
+                                        style: const TextStyle(color: Colors.white70, fontSize: 12),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      const Icon(Icons.emoji_events, size: 14, color: Colors.amber),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        'Max: ${quest.maxStreak}',
+                                        style: const TextStyle(color: Colors.white70, fontSize: 12),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                         ),
@@ -581,7 +729,14 @@ class _MainScaffoldState extends State<MainScaffold> {
             child: _currentIndex == 0
                 ? homeContent
                 : _currentIndex == 1
-                    ? CalendarScreen(quests: quests, currentDate: currentDate)
+                    ? CalendarScreen(
+                        quests: quests,
+                        currentDate: currentDate,
+                        dailyHistory: dailyHistory,
+                        eventLoader: _eventLoader,
+                      )
+                    : _currentIndex == 2
+                        ? const HeroDashboardScreen()
                     : ProfileScreen(
                         level: level,
                         currentAvatar: currentAvatar,
@@ -602,6 +757,7 @@ class _MainScaffoldState extends State<MainScaffold> {
             items: const [
               BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Home'),
               BottomNavigationBarItem(icon: Icon(Icons.calendar_month), label: 'Calendar'),
+              BottomNavigationBarItem(icon: Icon(Icons.auto_awesome), label: 'Hero'),
               BottomNavigationBarItem(icon: Icon(Icons.person), label: 'Profile'),
             ],
           ),

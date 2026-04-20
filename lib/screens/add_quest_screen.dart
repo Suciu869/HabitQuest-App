@@ -11,6 +11,8 @@ class AddQuestScreen extends StatefulWidget {
 
 class _AddQuestScreenState extends State<AddQuestScreen> {
   final TextEditingController _titleController = TextEditingController();
+  final TextEditingController _targetController = TextEditingController(text: '8');
+  QuestType _selectedType = QuestType.standard;
 
   void _saveQuest() {
     if (_titleController.text.trim().isEmpty) return;
@@ -20,6 +22,9 @@ class _AddQuestScreenState extends State<AddQuestScreen> {
       title: _titleController.text.trim(),
       icon: Icons.rocket_launch, // O iconiță mai modernă
       color: Theme.of(context).colorScheme.primary, // Folosim culoarea temei
+      type: _selectedType,
+      targetValue: int.tryParse(_targetController.text.trim()) ?? 8,
+      currentProgress: 0,
     );
 
     Navigator.pop(context, newQuest);
@@ -59,6 +64,39 @@ class _AddQuestScreenState extends State<AddQuestScreen> {
                 fillColor: Theme.of(context).colorScheme.surfaceContainerHighest,
               ),
             ),
+            const SizedBox(height: 16),
+            DropdownButtonFormField<QuestType>(
+              value: _selectedType,
+              decoration: InputDecoration(
+                labelText: 'Quest Type',
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(16)),
+                filled: true,
+                fillColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+              ),
+              items: const [
+                DropdownMenuItem(value: QuestType.standard, child: Text('Standard')),
+                DropdownMenuItem(value: QuestType.progressive, child: Text('Progressive')),
+                DropdownMenuItem(value: QuestType.negative, child: Text('Negative (Avoidance)')),
+              ],
+              onChanged: (value) {
+                if (value == null) return;
+                setState(() => _selectedType = value);
+              },
+            ),
+            if (_selectedType == QuestType.progressive) ...[
+              const SizedBox(height: 14),
+              TextField(
+                controller: _targetController,
+                keyboardType: TextInputType.number,
+                decoration: InputDecoration(
+                  labelText: 'Target Value',
+                  hintText: 'e.g., 8',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(16)),
+                  filled: true,
+                  fillColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+                ),
+              ),
+            ],
             const SizedBox(height: 30),
             SizedBox(
               width: double.infinity,

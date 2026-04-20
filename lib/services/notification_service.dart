@@ -100,6 +100,8 @@ class NotificationService {
 
   static const int _dailyMorningId = 200;
   static const int _dailyEveningId = 201;
+  static const int _streakFrozenIdBase = 400;
+  static const int _fomoNinePmId = 700;
 
   Future<void> scheduleDailyQuestReminders() async {
     await requestPermission();
@@ -176,6 +178,34 @@ class NotificationService {
       await flutterLocalNotificationsPlugin.cancel(id: _preEveningId);
       await flutterLocalNotificationsPlugin.cancel(id: _eveningId);
     }
+  }
+
+  Future<void> showStreakFrozenNotification({required String questTitle}) async {
+    await requestPermission();
+    final id = _streakFrozenIdBase + questTitle.hashCode.abs() % 200;
+    await flutterLocalNotificationsPlugin.show(
+      id: id,
+      title: 'Your streak is frozen! ❄️',
+      body: 'Watch a quick video now to restore your progress!',
+      notificationDetails: _details(),
+    );
+  }
+
+  Future<void> syncFomoAtNinePm({required bool hasPendingQuests}) async {
+    await requestPermission();
+    if (!hasPendingQuests) {
+      await flutterLocalNotificationsPlugin.cancel(id: _fomoNinePmId);
+      return;
+    }
+
+    await flutterLocalNotificationsPlugin.zonedSchedule(
+      id: _fomoNinePmId,
+      title: 'Castle Under Attack! 🏰',
+      body: 'The Sloth Goblin is approaching your streak! Open the app now and defend your progress!',
+      scheduledDate: _nextInstanceOfTime(21, 0),
+      notificationDetails: _details(),
+      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+    );
   }
 
   Future<void> _scheduleDaily({

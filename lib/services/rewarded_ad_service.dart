@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 
 class RewardedAdService {
@@ -25,13 +26,15 @@ class RewardedAdService {
 
     final completer = Completer<bool>();
 
-    // Android rewarded ad unit id (real)
-    const androidAdUnitId = 'ca-app-pub-4119925367707162/5976391224';
+    const androidTestAdUnitId = 'ca-app-pub-3940256099942544/5224354917';
+    const iosTestAdUnitId = 'ca-app-pub-3940256099942544/1712485313';
 
-    // iOS rewarded ad unit id (placeholder until you share the real one)
-    const iosAdUnitId = 'ca-app-pub-3940256099942544/1712485313';
+    const androidReleaseAdUnitId = 'ca-app-pub-4119925367707162/5976391224';
+    const iosReleaseAdUnitId = 'ca-app-pub-3940256099942544/1712485313';
 
-    final adUnitId = Platform.isAndroid ? androidAdUnitId : iosAdUnitId;
+    final adUnitId = Platform.isAndroid
+        ? (kDebugMode ? androidTestAdUnitId : androidReleaseAdUnitId)
+        : (kDebugMode ? iosTestAdUnitId : iosReleaseAdUnitId);
 
     RewardedAd.load(
       adUnitId: adUnitId,
